@@ -1,0 +1,615 @@
+//**************************************************************************//
+//** Author: Alex Kazuhiro Nagamatsu, Ahmed Farrukh, Dikshya Neupane********//
+//** Date Created: Sat Dec 16, 2021*****************************************//
+//** Final Report for CPE project*******************************************//
+//** UH-1000 Computer Programming for Engineers, NYUAD**********************//
+//** Problem:***************************************************************//
+//**************************************************************************//
+
+#include <M5Core2.h> // headers
+#include <WiFi.h> // headers
+#include <WiFiClient.h> // headers
+#include <WiFiAP.h> // headers
+#include <driver/i2s.h> // headers
+
+#define PIN_CLK  0 
+#define PIN_DATA 34
+#define READ_LEN (2 * 256)
+#define GAIN_FACTOR 5
+#define soundlevel 135
+uint8_t BUFFER[READ_LEN] = {0};
+
+void sanitised();
+void unsanitised();
+bool sanitisation=1;
+const char *ssid = "The Library Bot";
+const char *password = "12345678";
+
+WiFiServer server(80); // specify the port for the server
+RTC_TimeTypeDef RTCtime; // declaration
+RTC_DateTypeDef RTCDate; // declaration
+int day = 1; // declare a global variable called day
+int noiselevel=0; //declare noise level and initialize it to zero
+char timeStrbuff[64]; // declare an array that stores the time
+
+void setTime(); 
+void newday();
+void suntowed();
+void sat();
+void fri();
+void closingtimes();
+void reprint();
+void sanitisationcommunication();
+void CompareValue(int16_t *adcBuffer);
+void i2sInit();
+void mic_record_task ();
+
+void setup() {
+  M5.begin(); //Initialize M5Core2.  
+  i2sInit(); // Initialize the Mic
+  M5.Lcd.fillScreen(BLACK); // fill the screen with black
+  M5.Lcd.setCursor(0,100); // set the cursor to print in the center of the screen
+  M5.Lcd.setTextSize(2); // set font size to 2
+  M5.Lcd.println("Welcome to the library bot"); // display a welcome message
+  delay(5000); // make sure the statement is on the screen for 5 seconds
+
+  WiFi.softAP(ssid, password); // Set up an AP
+  server.begin(); // Start the network server  
+ 
+  
+
+  setTime(); // function to ask the user for day and time
+  sanitised(); // print "sanitized" on a green screen
+  
+ 
+}
+
+void loop() {
+  
+
+  M5.Rtc.GetTime(&RTCtime); //Gets the time in the real-time clock.  
+  newday(); // function that increments the day variable if the time is past 12
+  closingtimes(); // function that alarms the user regarding closing times
+  M5.update(); // function that updates the input from M5 butttons and touchscreen
+  Event& e = M5.Buttons.event; 
+
+
+  if (e & (E_TOUCH)) { // check if the screen is touched
+   if(sanitisation==1){ // check if the device was proviously sanitized
+    unsanitised();
+    sanitisation=0;
+    
+    }
+   else{sanitised(); // check if the device was proviously unsanitized
+   sanitisation=1;
+   }
+}
+
+sanitisationcommunication(); // updates information on the wifi access point
+mic_record_task(); // function to record the sound
+  }
+
+
+
+
+
+void CompareValue(int16_t* adcBuffer){ /* adcBuffer is a pointer variable 
+  that stores the analoge information from the microphone in 16 bits*/
+  int y;
+
+  for (int n = 0; n < (READ_LEN/2); n++){ // repeat the loop for 256 times
+    y = adcBuffer[n] * GAIN_FACTOR; // amplify the signal
+    y = map(y, INT16_MIN, INT16_MAX, 10, 200); //  amplify the signal
+  
+    
+    if(y > soundlevel && millis() > 6000){ // check if the sound level is greater than thresold 
+    
+    M5.Lcd.fillScreen(MAROON); 
+    M5.Lcd.setTextColor(WHITE);
+    M5.Lcd.setTextSize(5);
+    M5.Lcd.setCursor(20,50); // set the cursor
+    M5.Lcd.printf("PLEASE BE");
+    M5.Lcd.setCursor(65,120); // move the cursor farther
+    M5.Lcd.printf("QUIET!");
+    
+    noiselevel=1;
+    
+    int time1 = millis(); // store the initial time
+    int time2 = millis(); // store the new time in each loop
+    
+    while(time2 < time1 + 4000){ // run the loop for 4 seconds
+      
+      sanitisationcommunication(); 
+      M5.Rtc.GetTime(&RTCtime);
+      newday();
+     
+      time2=millis();} // update the value of time2
+      
+    noiselevel=0; // return the noise level back to zero
+    reprint(); // take us back to the sanitization screem
+    break;
+    }
+    
+
+
+  }
+}
+
+void mic_record_task ()
+{  
+  size_t bytesread; // 
+
+  int16_t *adcBuffer = NULL; // initialize the buffer
+    i2s_read(I2S_NUM_0,(char*) BUFFER, READ_LEN, &bytesread, (100 / portTICK_RATE_MS)); // record and store sound values in the BUFFER
+    adcBuffer = (int16_t *)BUFFER; // store the pointer to the BUFFER in the adcBuffer in 16 bits
+    CompareValue(adcBuffer); // pass adcBuffer to the CompareValue function
+    
+
+  
+}
+
+
+
+
+void i2sInit() // initialise the microphone
+{
+   i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
+    .sample_rate =  44100,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, // is fixed at 12bit, stereo, MSB
+    .channel_format = I2S_CHANNEL_FMT_ALL_RIGHT,
+    .communication_format = I2S_COMM_FORMAT_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 2,
+    .dma_buf_len = 128,
+   };
+
+   i2s_pin_config_t pin_config; // plug - ins for the microphone
+   pin_config.bck_io_num   = I2S_PIN_NO_CHANGE;
+   pin_config.ws_io_num    = PIN_CLK;
+   pin_config.data_out_num = I2S_PIN_NO_CHANGE;
+   pin_config.data_in_num  = PIN_DATA;
+  
+   
+   i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+   i2s_set_pin(I2S_NUM_0, &pin_config);
+   i2s_set_clk(I2S_NUM_0, 44100, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
+}
+
+
+
+
+
+
+
+void setTime(){
+  M5.Lcd.fillScreen(PURPLE);
+  M5.Lcd.setTextColor(WHITE);
+   M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(115,60);
+   M5.Lcd.printf("Hours");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+
+   int hour = 3;
+   M5.Lcd.println(hour);
+
+   while(!M5.BtnB.wasReleased()){ 
+    M5.update(); // update the button status 
+
+    if(M5.BtnA.wasReleased()){
+  hour=hour-1; // decrement hour
+  
+  if(hour < 0){hour = 23;}
+    M5.Lcd.fillScreen(PURPLE);
+       M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(115,60);
+   M5.Lcd.printf("Hours");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+    M5.Lcd.println(hour);
+
+
+    }
+     if(M5.BtnC.wasReleased()){
+  hour=hour+1; 
+   if(hour > 23){hour = 1;}
+    M5.Lcd.fillScreen(PURPLE);
+       M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(115,60);
+   M5.Lcd.printf("Hours");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+    M5.Lcd.println(hour); 
+      }
+
+
+    if(M5.BtnB.wasReleased()){break;}
+  }
+      M5.update();
+  M5.Lcd.fillScreen(NAVY);
+  int minute=0;
+
+  M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(100,60);
+   M5.Lcd.printf("Minutes");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+
+   M5.Lcd.println(minute);
+
+   while(!M5.BtnB.wasReleased()){
+    M5.update();
+
+    if(M5.BtnA.wasReleased()){
+  minute=minute-1;
+  if(minute < 0){minute = 59;}
+    M5.Lcd.fillScreen(NAVY);
+       M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(100,60);
+   M5.Lcd.printf("Minutes");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+    M5.Lcd.println(minute);
+    }
+     if(M5.BtnC.wasReleased()){
+  minute=minute+1; 
+   if(minute > 59){minute = 0;}
+    M5.Lcd.fillScreen(NAVY);
+       M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(100,60);
+   M5.Lcd.printf("Minutes");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+    M5.Lcd.println(minute); 
+      }
+
+
+    if(M5.BtnB.wasReleased()){break;}
+  }
+  M5.Lcd.fillScreen(MAGENTA);
+      M5.update();
+  int second=0;
+
+  M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(100,60);
+   M5.Lcd.printf("Seconds");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+
+   M5.Lcd.println(second);
+
+   while(!M5.BtnB.wasReleased()){
+    M5.update();
+
+    if(M5.BtnA.wasReleased()){
+  second=second-1;
+  if(second < 0){second = 59;}
+    M5.Lcd.fillScreen(MAGENTA);
+       M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(100,60);
+   M5.Lcd.printf("Seconds");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+    M5.Lcd.println(second);
+    }
+     if(M5.BtnC.wasReleased()){
+  second=second+1; 
+   if(second > 59){second = 0;}
+    M5.Lcd.fillScreen(MAGENTA);
+       M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(100,60);
+   M5.Lcd.printf("Seconds");
+   M5.Lcd.setTextSize(5);
+   M5.Lcd.setCursor(135,100);
+    M5.Lcd.println(second); 
+      }
+
+
+    if(M5.BtnB.wasReleased()){break;}
+  }
+
+  //this is where the day selection starts
+  int date=1;
+    M5.Lcd.fillScreen(CYAN);
+    M5.update();
+     M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(125,60);
+   M5.Lcd.printf("Days");
+   M5.Lcd.setTextSize(4);
+M5.Lcd.setTextDatum(MC_DATUM);
+
+M5.Lcd.drawString("Monday", 160, 120, 2);
+
+   while(!M5.BtnB.wasReleased()){
+    M5.update();
+    if(M5.BtnA.wasReleased()){
+  date=date-1;
+  if(date < 1){date = 7;}
+    M5.Lcd.fillScreen(CYAN);
+       M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(125,60);
+   M5.Lcd.printf("Days");
+   M5.Lcd.setTextSize(4);
+
+M5.Lcd.setTextDatum(MC_DATUM);
+
+
+   if(date==1){M5.Lcd.drawString("Monday", 160, 120, 2);}
+   if(date==2){M5.Lcd.drawString("Tuesday", 160, 120, 2);}
+   if(date==3){M5.Lcd.drawString("Wednesday", 160, 120, 2);}
+   if(date==4){M5.Lcd.drawString("Thursday", 160, 120, 2);}
+   if(date==5){M5.Lcd.drawString("Friday", 160, 120, 2);}
+   if(date==6){M5.Lcd.drawString("Saturday", 160, 120, 2);}
+   if(date==7){M5.Lcd.drawString("Sunday", 160, 120, 2);}
+   }
+     if(M5.BtnC.wasReleased()){
+  date=date+1;
+   if(date >7){date=1;}
+    M5.Lcd.fillScreen(CYAN);
+       M5.Lcd.setTextSize(3); 
+   M5.Lcd.setCursor(125,60);
+   M5.Lcd.printf("Days");
+   M5.Lcd.setTextSize(4);
+M5.Lcd.setTextDatum(MC_DATUM);
+
+
+   if(date==1){M5.Lcd.drawString("Monday", 160, 120, 2);}
+   if(date==2){M5.Lcd.drawString("Tuesday", 160, 120, 2);}
+   if(date==3){M5.Lcd.drawString("Wednesday", 160, 120, 2);}
+   if(date==4){M5.Lcd.drawString("Thursday", 160, 120, 2);}
+   if(date==5){M5.Lcd.drawString("Friday", 160, 120, 2);}
+   if(date==6){M5.Lcd.drawString("Saturday", 160, 120, 2);}
+   if(date==7){M5.Lcd.drawString("Sunday", 160, 120, 2);}
+   }
+          if(M5.BtnB.wasReleased()){break;}
+   }
+  
+  day = date;
+
+  RTCtime.Hours = hour; //
+  RTCtime.Minutes = minute;
+  RTCtime.Seconds = second;
+  M5.Rtc.SetTime(&RTCtime); //and writes the set time to the real time clock.  
+
+  RTCDate.Year = 2021;  //Set the date.  
+  RTCDate.Month = 12;
+  RTCDate.Date = 3;
+  M5.Rtc.SetDate(&RTCDate);
+}
+  
+
+void newday(){
+    if(RTCtime.Hours == 0 && RTCtime.Minutes == 0 && RTCtime.Seconds==0){
+   day++;
+   if(day == 8){
+    day = 1; 
+   }
+  }
+  }
+void suntowed(){
+  M5.Lcd.setTextSize(4);  
+  if((RTCtime.Hours==23&&RTCtime.Minutes==45&&RTCtime.Seconds>=0&&RTCtime.Seconds<5)){
+  M5.Axp.SetLDOEnable(3,true); 
+  M5.Lcd.fillScreen(MAROON);
+  M5.Lcd.setCursor(25,30);
+  M5.Lcd.print("The Library");
+  M5.Lcd.setCursor(35,100);
+  M5.Lcd.print("will close");
+  M5.Lcd.setCursor(0,170);
+  M5.Lcd.print("in 15 minutes"); 
+
+  delay(9000);//let the M5Stack vibrate for 9 seconds
+  M5.Axp.SetLDOEnable(3,false);
+  reprint();
+    }
+
+  if (RTCtime.Hours==0&&RTCtime.Minutes==0&&RTCtime.Seconds>=0&&RTCtime.Seconds<5){
+  M5.Axp.SetLDOEnable(3,true);  
+  M5.Lcd.fillScreen(MAROON);
+  M5.Lcd.setCursor(25,30);
+  M5.Lcd.print("Immediately");
+  M5.Lcd.setCursor(45,100);
+  M5.Lcd.print("leave the");
+  M5.Lcd.setCursor(65,170);
+  M5.Lcd.print("Library!"); 
+  delay(5000);
+  M5.Axp.SetLDOEnable(3,false); 
+  reprint(); 
+  }}
+void sat(){
+  M5.Lcd.setTextSize(4);  
+  if((RTCtime.Hours==21&&RTCtime.Minutes==45&&RTCtime.Seconds>=0&&RTCtime.Seconds<5)){
+  M5.Axp.SetLDOEnable(3,true);   
+  M5.Lcd.fillScreen(MAROON);
+  M5.Lcd.setCursor(25,30);
+  M5.Lcd.print("The Library");
+  M5.Lcd.setCursor(35,100);
+  M5.Lcd.print("will close");
+  M5.Lcd.setCursor(0,170);
+  M5.Lcd.print("in 15 minutes"); 
+
+  delay(9000);//let the M5Stack vibrate for 9 seconds
+  M5.Axp.SetLDOEnable(3,false);
+  reprint();
+  }
+
+  if (RTCtime.Hours==22&&RTCtime.Minutes==0&&RTCtime.Seconds>=0&&RTCtime.Seconds<5){
+  M5.Axp.SetLDOEnable(3,true);
+  M5.Lcd.fillScreen(MAROON);
+  M5.Lcd.setCursor(25,30);
+  M5.Lcd.print("Immediately");
+  M5.Lcd.setCursor(45,100);
+  M5.Lcd.print("leave the");
+  M5.Lcd.setCursor(65,170);
+  M5.Lcd.print("Library!"); 
+  delay(5000);
+  M5.Axp.SetLDOEnable(3,false);
+  reprint();
+    
+    }}
+void fri(){
+  M5.Lcd.setTextSize(4);  
+  if((RTCtime.Hours==17&&RTCtime.Minutes==45&&RTCtime.Seconds>=0&&RTCtime.Seconds<5)){
+  M5.Axp.SetLDOEnable(3,true); 
+  M5.Lcd.fillScreen(MAROON);
+  M5.Lcd.setCursor(25,30);
+  M5.Lcd.print("The Library");
+  M5.Lcd.setCursor(35,100);
+  M5.Lcd.print("will close");
+  M5.Lcd.setCursor(0,170);
+  M5.Lcd.print("in 15 minutes"); 
+
+  delay(9000);//let the M5Stack vibrate for 9 seconds
+  M5.Axp.SetLDOEnable(3,false);
+  reprint();
+    }
+
+  if (RTCtime.Hours==18&&RTCtime.Minutes==0&&RTCtime.Seconds>=0&&RTCtime.Seconds<5){
+    M5.Axp.SetLDOEnable(3,true);  
+    M5.Lcd.fillScreen(MAROON);
+    M5.Lcd.setCursor(25,30);
+  M5.Lcd.print("Immediately");
+  M5.Lcd.setCursor(45,100);
+  M5.Lcd.print("leave the");
+  M5.Lcd.setCursor(65,170);
+  M5.Lcd.print("Library!");
+    delay(5000);
+    M5.Axp.SetLDOEnable(3,false);
+    reprint();
+    }}
+void thu(){
+  M5.Lcd.setTextSize(4);  
+  if((RTCtime.Hours==19&&RTCtime.Minutes==45&&RTCtime.Seconds>=0&&RTCtime.Seconds<5)){
+  M5.Axp.SetLDOEnable(3,true); 
+  M5.Lcd.fillScreen(MAROON);
+  M5.Lcd.setCursor(25,30);
+  M5.Lcd.print("The Library");
+  M5.Lcd.setCursor(35,100);
+  M5.Lcd.print("will close");
+  M5.Lcd.setCursor(0,170);
+  M5.Lcd.print("in 15 minutes"); 
+
+  delay(9000);//let the M5Stack vibrate for 9 seconds
+  M5.Axp.SetLDOEnable(3,false);
+  reprint();
+    }
+
+  if (RTCtime.Hours==20&&RTCtime.Minutes==0&&RTCtime.Seconds>=0&&RTCtime.Seconds<5){
+    M5.Axp.SetLDOEnable(3,true);
+    M5.Lcd.fillScreen(MAROON);  
+    M5.Lcd.setCursor(25,30);
+  M5.Lcd.print("Immediately");
+  M5.Lcd.setCursor(45,100);
+  M5.Lcd.print("leave the");
+  M5.Lcd.setCursor(65,170);
+  M5.Lcd.print("Library!");
+    delay(5000);
+    M5.Axp.SetLDOEnable(3,false);
+    reprint();
+    }
+  }
+
+void closingtimes(){  
+  if((day>=1&&day<=3)||day==7){
+  suntowed();}
+  if(day==6){
+  sat(); 
+  }
+  if(day==5){
+  fri();
+  }
+  if(day==4){
+    thu();
+    }}
+void sanitised(){
+  M5.Lcd.fillScreen(GREEN);//Set the screen background as green
+  M5.Lcd.setTextColor(WHITE); //Set the font color to white.
+  M5.Lcd.setTextSize(4); //Set the font size. 
+  M5.Lcd.setCursor(50,100);
+  M5.Lcd.printf("Sanitised");  //Printing santiised message
+}
+void unsanitised(){
+  M5.Lcd.fillScreen(RED);//Set the screen background as red
+  M5.Lcd.setTextColor(WHITE); //Set the font color to white.
+  M5.Lcd.setTextSize(4);  //Set the font size. 
+  M5.Lcd.setCursor(25,100);
+  M5.Lcd.printf("Unsanitised");  //Printing santiised message
+}
+void sanitisationcommunication(){
+    WiFiClient client = server.available();   // listen for incoming clients.  
+   
+  if (client) {                             // if you get a client.  
+    String currentLine = "";                // make a String to hold incoming data from the client.  
+
+    while (client.connected()) {            // loop while the client's connected,continuously receiving data.  
+      
+      if (client.available()) {             // if there's bytes to read from the client.  
+        char c = client.read();             // store the read a byte.  
+        Serial.write(c);
+        if (c == '\n') {                    // if the byte is a newline character.  
+          // \n is the end of the client'S HTTP request, indicating that the client has sent a new request
+          if (currentLine.length() == 0) {
+            //Here are the instructions to create a page. 
+
+            //HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
+            //and a content-type so the client knows what's coming, then a blank line:
+            client.println("HTTP/1.1 200 OK");
+            client.println("Content-type:text/html");
+            client.println();
+
+            // the content of the HTTP response follows the header:
+
+            // /High and /Low are the data received when clicking the corresponding connection
+
+            client.print("Click <a href=\"/High\">here</a> to change sanitisation status.<br>");
+            client.print("Click <a href=\"/Low\">here</a> to refresh.<br>");
+
+            
+           
+            if(sanitisation==1){
+             client.print("Sanitisation Status: Sanitised <br>");}
+            else{
+             client.print("Sanitisation Status: Unsanitised <br>");
+        }
+        
+       
+        if(noiselevel==1){
+             client.print("Noise Level: High ");}
+            else{
+             client.print("Noise Level: Normal ");
+        }
+        // The HTTP response ends with another blank line:
+         client.println();
+            // break out of the while loop
+            break;
+          } else {    // if you got a newline, then clear currentLine
+            currentLine = "";
+          }
+        } else if (c != '\r') {  // if you got anything else but a carriage return character.  
+          currentLine += c;      // add it to the end of the currentLine. 
+        }
+
+        // Check to see if the client request was "GET /H" or "GET /L":
+        //GET /High”“GET /Low”:
+        if (currentLine.endsWith("GET /High")) {
+          if(sanitisation==1){
+          unsanitised();
+          sanitisation=0;
+         }
+         else{
+          sanitised();
+          sanitisation=1;}
+        }
+      }
+    }
+    client.stop();  // close the connection.  
+  }
+}
+void reprint(){
+  if(sanitisation==1){
+    sanitised();
+    }
+   else{
+   unsanitised();
+   }}
